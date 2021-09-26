@@ -7,7 +7,7 @@ import queue
 
 
 class Image:
-    def __init__(self, file, min_cluster_size, num_of_colors):
+    def __init__(self, file, min_cluster_size, num_of_colors, step_size):
         self.file = file
         self.image = None
         self.clustered_image = None
@@ -17,6 +17,7 @@ class Image:
         self.color_dict = {}
         self.clusters = []
         self.pixel_array = None
+        self.step_size = step_size
 
     def read_file(self):
         image = cv2.imread(self.file)
@@ -37,53 +38,89 @@ class Image:
 
     def color_image(self):
         clustered_image = np.empty((self.image.shape[0], self.image.shape[1], 3))
-        for i in range(self.image.shape[0]):
-            for j in range(self.image.shape[1]):
-                clustered_image[i, j] = self.color_dict[self.color_labels[i, j]]
+        for i in range(0, self.image.shape[0], self.step_size):
+            for j in range(0, self.image.shape[1], self.step_size):
+                if ((i + self.step_size) < self.image.shape[0]) and ((j + self.step_size) < self.image.shape[1]):
+                    unique, counts = np.unique(self.color_labels[i:i + self.step_size, j:j + self.step_size],
+                                               return_counts=True)
+                    clustered_image[i:i + self.step_size, j:j + self.step_size] = self.color_dict[
+                        unique[np.argmax(counts)]]
+                elif (i + self.step_size) < self.image.shape[0]:
+                    unique, counts = np.unique(self.color_labels[i:i + self.step_size, j:j + self.step_size],
+                                               return_counts=True)
+                    clustered_image[i:i + self.step_size, j:] = self.color_dict[unique[np.argmax(counts)]]
+                else:
+                    unique, counts = np.unique(self.color_labels[i:, j:j + self.step_size], return_counts=True)
+                    clustered_image[i:, j:j + self.step_size] = self.color_dict[unique[np.argmax(counts)]]
+
         self.clustered_image = clustered_image
-        fig = plt.imshow(self.clustered_image / 255)
+        plt.imshow(self.clustered_image / 255)
         plt.show()
 
-    def create_clusters(self):
-        self.get_pixel_array()
+    def create_no_border_clusters(self):
+        self.get_no_border_pixel_array()
         cluster_id = 0
+        cluster = Cluster(id=cluster_id)
+        problematic_clusters = []
         q = queue.Queue()
         for i in range(self.pixel_array.shape[0]):
             for j in range(self.pixel_array.shape[1]):
                 pixel = self.pixel_array[i, j]
-                if not pixel.border_pixel:
-                    if pixel.cluster_id == -1:
-                        q.put(pixel)
-                        while q.qsize() > 0:
-                            curr_pixel = q.get()
-                            curr_pixel.cluster_id = cluster_id
-                            neighbours = self.get_neighbours(curr_pixel.x, curr_pixel.y)
-                            for neighbour in neighbours:
-                                if neighbour is not None:
-                                    n = self.pixel_array[neighbour]
-                                    if (not n.border_pixel) and (n.cluster_id == -1) and (not n.open):
-                                        n.open = True
-                                        q.put(n)
-                        cluster_id += 1
+                curr_cluster_color = pixel.color
+                if pixel.cluster_id == -1:
+                    q.put(pixel)
+                    cluster.pixels.append(pixel)
+                    cluster.color = curr_cluster_color
+                    while q.qsize() > 0:
+                        # print(q.qsize())
+                        curr_pixel = q.get()
+                        curr_pixel.cluster_id = cluster_id
+                        neighbours = self.get_neighbours(curr_pixel.x, curr_pixel.y)
+                        for neighbour in neighbours:
+                            if neighbour is not None:
+                                n = self.pixel_array[neighbour]
+                                if (n.color == curr_cluster_color) and (not n.open):
+                                    n.open = True
+                                    q.put(n)
+                                    cluster.pixels.append(n)
+                    cluster.pixels = list(set(cluster.pixels))
+                    if len(cluster.pixels) < self.min_cluster_size:
+                        problematic_clusters.append(cluster)
+                    self.clusters.append(cluster)
+                    cluster_id += 1
+                    cluster = Cluster(id=cluster_id)
 
-                else:
-                    pixel.cluster_id = -2
-        self.show_borders()
-        self.show_pixel_array_cluster(1)
-        self.show_pixel_array_cluster(2)
-        self.show_pixel_array_cluster(10)
-        self.set_neighbour_clusters()
-        print(len(self.clusters))
+        self.deal_with_small_clusters(problematic_clusters)
+        self.show_no_borderpixel_borders()
 
-    def get_neighbour_clusters(self, border_pixel):
-        neighbours = self.get_neighbours(border_pixel.x, border_pixel.y)
-        neighbouring_clusters = []
-        for neighbour_coords in neighbours:
-            if neighbour_coords is not None:
-                neighbour_pixel = self.pixel_array[neighbour_coords]
-                if not neighbour_pixel.border_pixel:
-                    neighbouring_clusters.append(neighbour_pixel.cluster_id)
-        return set(neighbouring_clusters)
+    def get_neighbouring_clusters(self, cluster_id=-1, cluster=None):
+        if cluster is None:
+            cluster = self.get_cluster(cluster_id)
+        neighboring_clusters = []
+        for pixel in cluster.pixels:
+            neighbours = self.get_neighbours(pixel.x, pixel.y)
+            for neighbour in neighbours:
+                if neighbour is not None:
+                    n = self.pixel_array[neighbour]
+                    if (n.cluster_id != pixel.cluster_id) and (n.cluster_id not in neighboring_clusters):
+                        neighboring_clusters.append(n.cluster_id)
+        return neighboring_clusters
+
+    def deal_with_small_clusters(self, problematic_clusters):
+        for cluster in problematic_clusters:
+            neighbour_clusters = self.get_neighbouring_clusters(cluster=cluster)
+            neighbour_clusters = [x for x in neighbour_clusters if x not in problematic_clusters]
+            assert len(neighbour_clusters) > 0
+            # 'does not necessary need to be bigger than zero,
+            # TODO: let's just hope this never happens for now... haha
+
+            closest_cluster_id = self.get_closest_color(cluster, neighbour_clusters)
+            closest_cluster = self.get_cluster(closest_cluster_id)
+            for pixel in cluster.pixels:
+                pixel.cluster_id = closest_cluster_id
+                pixel.color = closest_cluster.color
+                closest_cluster.pixels.append(pixel)
+            self.clusters.remove(cluster)
 
     def get_pixel(self, x, y):
         return self.pixel_array[x, y]
@@ -119,72 +156,27 @@ class Image:
     def get_colors(self):
         return self.color_dict.values()
 
-    def show_borders(self):
+    def show_no_borderpixel_borders(self):
         img = np.ones(self.image.shape)
+        border = []
         for i in range(self.pixel_array.shape[0]):
             for j in range(self.pixel_array.shape[1]):
-                if self.pixel_array[i, j].border_pixel:
-                    img[i, j, :] = [0, 0, 0]
+                pixel = self.pixel_array[i, j]
+                for n in self.get_neighbours(pixel.x, pixel.y):
+                    if n is not None:
+                        neighbour_pixel = self.pixel_array[n]
+                        if (neighbour_pixel.cluster_id != pixel.cluster_id) and (neighbour_pixel not in border):
+                            img[i, j] = [0, 0, 0]
+                            border.append(pixel)
         plt.imshow(img)
         plt.show()
 
-    def set_neighbour_clusters(self):
-        for i in range(self.pixel_array.shape[0]):
-            for j in range(self.pixel_array.shape[1]):
-                pixel = self.pixel_array[i, j]
-                if not pixel.border_pixel:
-                    cluster = self.get_cluster(pixel.cluster_id)
-                    if cluster is None:
-                        cluster = Cluster(id=pixel.cluster_id)
-                        cluster.color = pixel.color
-                        self.clusters.append(cluster)
-                    cluster.pixels.append(pixel)
-
-        for i in range(self.pixel_array.shape[0]):
-            for j in range(self.pixel_array.shape[1]):
-                pixel = self.pixel_array[i, j]
-                if (i == 355) and (j == 178):
-                    print('stop')
-                if pixel.border_pixel:
-                    neighbours = self.get_neighbours(pixel.x, pixel.y)
-                    for n in neighbours:
-                        if n is not None:
-                            n_pixel = self.pixel_array[n]
-                            if (i == 355) and (j == 178):
-                                print(
-                                    f'neighbour: {n_pixel.x}, {n_pixel.y}, border pixel: {n_pixel.border_pixel}, cluster id: {n_pixel.cluster_id}')
-                            if not n_pixel.border_pixel:
-                                cluster = self.get_cluster(n_pixel.cluster_id)
-                                assert cluster is not None
-                                cluster.border.append(pixel)
-
-        for i in range(self.image.shape[0]):
-            for j in range(self.image.shape[1]):
-                pixel = self.pixel_array[i, j]
-                if not pixel.border_pixel:
-                    assert pixel.cluster_id != -1
-                    assert pixel.color != -1
-
-        print(len(self.clusters))
-
-    def get_pixel_array(self):
+    def get_no_border_pixel_array(self):
         self.pixel_array = np.empty((self.image.shape[0], self.image.shape[1]), dtype=Pixel)
         for i in range(self.image.shape[0]):
             for j in range(self.image.shape[1]):
-                neighbours = self.get_neighbours(i, j)
-                border_pixel = False
-                for neighbour in neighbours:
-                    if neighbour is not None:
-                        if (self.color_labels[neighbour] != self.color_labels[i, j]) and (self.color_labels[neighbour] != -1):
-                            border_pixel = True
-                            self.color_labels[i, j] = -1
-                            break
-                if not border_pixel:
-                    pixel = NormalPixel(i, j, color=self.color_labels[i, j])
-                else:
-                    pixel = BorderPixel(i, j)
+                pixel = NormalPixel(i, j, color=self.color_labels[i, j])
                 self.pixel_array[i, j] = pixel
-        self.show_borders()
 
     def show_pixel_array_cluster(self, cluster_id):
         cluster_img = np.ones(self.image.shape)
@@ -201,78 +193,10 @@ class Image:
         print(f'cluster id: {cluster.id}, cluster size: {cluster.get_cluster_size()}')
         for pixel in cluster.pixels:
             cluster_img[pixel.x, pixel.y] = self.color_dict[pixel.color] / 255
-        for border_pixel in cluster.border:
-            cluster_img[border_pixel.x, border_pixel.y] = [0, 0, 0]
+        # for border_pixel in cluster.border:
+        #     cluster_img[border_pixel.x, border_pixel.y] = [0, 0, 0]
         plt.imshow(cluster_img)
         plt.show()
-
-    def deal_with_no_feasible_border_cluster(self, cluster):
-        neighbouring_cluster_ids = []
-        for border_pixel in cluster.border:
-            neighbours = self.get_neighbours(border_pixel.x, border_pixel.y)
-            for n in neighbours:
-                if n is not None:
-                    pixel = self.pixel_array[n]
-                    if pixel.border_pixel:
-                        for n_cluster_id in self.get_neighbour_clusters(pixel):
-                            if n_cluster_id != cluster.id:
-                                neighbouring_cluster_ids.append(n_cluster_id)
-        neighbouring_cluster_ids = set(neighbouring_cluster_ids)
-        print(f'{len(neighbouring_cluster_ids)} neighbouring clusters: {neighbouring_cluster_ids} for no feasible border cluster: {cluster.id}')
-        closest_cluster_id = self.get_closest_color(cluster, neighbouring_cluster_ids)
-        closest_cluster = self.get_cluster(closest_cluster_id)
-        for pixel in cluster.pixels:
-            pixel.cluster_id = closest_cluster_id
-            pixel.color = closest_cluster.color
-            closest_cluster.pixels.append(pixel)
-        for border_pixel in cluster.border:
-            self.change_border_pixel_to_normal(border_pixel, cluster, closest_cluster)
-
-        self.remove_cluster_from_pixel_array(cluster.id)
-        self.clusters.remove(cluster)
-
-    def merge_small_clusters(self):
-        i = 0
-        changed = False
-        clusters_to_remove = []
-        old_clusters = self.clusters.copy()
-        for cluster in old_clusters:
-            print('cluster id:', cluster.id, ' cluster size: ', cluster.get_cluster_size())
-            if cluster.get_cluster_size() < self.min_cluster_size:
-                feasible_border_pixels = [pixel for pixel in cluster.border if len(self.get_neighbour_clusters(pixel)) > 1]
-                # feasible_border_pixels = [pixel for pixel in feasible_border_pixels if self.get_cluster(
-                # pixel.cluster_id).get_cluster_size() > self.min_cluster_size]
-                assert len(feasible_border_pixels) > 0
-
-                selected_border_cluster = -1
-                distance = float('inf')
-                for pixel in feasible_border_pixels:
-                    for id in self.get_neighbour_clusters(pixel):
-                        if id != cluster.id:
-                            if np.linalg.norm(self.color_dict[cluster.color] - self.color_dict[
-                                self.get_cluster(id).color]) < distance:
-                                distance = np.linalg.norm(
-                                    self.color_dict[cluster.color] - self.color_dict[self.get_cluster(id).color])
-                                selected_border_cluster = id
-
-                print('selecting cluster id: ', selected_border_cluster, ' to merge with cluster id: ', cluster.id)
-                cluster_to_merge = self.get_cluster(selected_border_cluster)
-
-                for pixel in cluster.pixels:
-                    pixel.cluster_id = cluster_to_merge.id
-                    pixel.color = cluster_to_merge.color
-                    cluster_to_merge.pixels.append(pixel)
-
-                for i, border_pixel in enumerate(cluster.border):
-                    border_pixel_neighbours = self.get_neighbour_clusters(border_pixel)
-                    if border_pixel_neighbours == {cluster_to_merge.id}:
-                        self.change_border_pixel_to_normal(border_pixel, cluster, cluster_to_merge)
-                    else:
-                        cluster_to_merge.border.append(border_pixel)
-                    # print(i)
-                self.remove_cluster_from_pixel_array(cluster.id)
-            print(cluster.id, 'done')
-            self.show_borders()
 
     def make_pre_merging_checkup(self):
         for cluster in self.clusters:
@@ -284,7 +208,7 @@ class Image:
                 # assert cluster.id in pixel.neighbour_clusters
                 assert pixel.border_pixel
 
-    def get_closest_color(self, cluster, other_clusters):
+    def get_closest_color(self, cluster: Cluster, other_clusters: list[int]):
         distance = float('inf')
         closest_cluster_id = -1
         for other_c_id in other_clusters:
@@ -294,25 +218,3 @@ class Image:
                 distance = np.linalg.norm(color - self.color_dict[cluster.color])
                 closest_cluster_id = other_cluster.id
         return closest_cluster_id
-
-    def change_border_pixel_to_normal(self, border_pixel, cluster, cluster_to_merge):
-        new_pixel = NormalPixel(border_pixel.x, border_pixel.y, cluster_to_merge.color)
-        new_pixel.cluster_id = cluster_to_merge.id
-        # print(f'changed pixel {border_pixel.x}, {border_pixel.y} from border to normal')
-        self.pixel_array[border_pixel.x, border_pixel.y] = new_pixel
-        cluster_to_merge.pixels.append(new_pixel)
-
-        for c in self.get_neighbour_clusters(border_pixel):
-            cluster_to_remove_border = self.get_cluster(c)
-            if border_pixel in cluster_to_remove_border.border:
-                cluster_to_remove_border.border.remove(border_pixel)
-
-    def remove_cluster_from_pixel_array(self, cluster_to_remove_id):
-        for i in range(self.image.shape[0]):
-            for j in range(self.image.shape[1]):
-                pixel = self.pixel_array[i, j]
-                if pixel.border_pixel:
-                    pass
-                else:
-                    assert pixel.cluster_id != cluster_to_remove_id
-
